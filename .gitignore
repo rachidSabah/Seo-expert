@@ -1,0 +1,14 @@
+node_modules/
+.next/
+db/
+*.db
+.env
+.env.local
+.vercel/
+worklog.md
+.zscripts/
+dev.log
+server.log
+bun.lock
+out/
+_next/

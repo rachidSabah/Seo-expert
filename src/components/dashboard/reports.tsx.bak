@@ -1,0 +1,1007 @@
+"use client";
+
+import React, { useState, useEffect, useCallback } from "react";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Separator } from "@/components/ui/separator";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  FileText,
+  Download,
+  Eye,
+  Globe,
+  Zap,
+  FileSearch,
+  Target,
+  Link2,
+  Users,
+  ChevronDown,
+  ChevronUp,
+  FileBarChart,
+  Gauge,
+  Clock,
+  AlertCircle,
+  AlertTriangle,
+  Info,
+  CheckCircle2,
+  XCircle,
+  ArrowRight,
+  Calendar,
+  BarChart3,
+  Shield,
+  ToggleLeft,
+  Trash2,
+  Sparkles,
+  Loader2,
+} from "lucide-react";
+import {
+  getAllLatestAnalyses,
+  getSites,
+  type SiteAnalysis,
+} from "@/lib/site-store";
+import {
+  generateCsvReport,
+  generateHtmlReport,
+  downloadFile,
+} from "@/lib/report-generator";
+import { getSchedules, toggleSchedule, removeSchedule } from "@/lib/scheduler";
+import { useToast } from "@/hooks/use-toast";
+import { useAppStore } from "@/store/app-store";
+import type { SiteAnalysisResult } from "@/lib/url-analyzer";
+import { generateSeoRecommendations } from "@/lib/puter-ai";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function getScoreColor(score: number): string {
+  if (score >= 80) return "#10b981";
+  if (score >= 50) return "#f59e0b";
+  return "#ef4444";
+}
+
+function getScoreBadgeClass(score: number): string {
+  if (score >= 80) return "bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800";
+  if (score >= 50) return "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800";
+  return "bg-red-100 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800";
+}
+
+function formatDate(dateStr: string): string {
+  const date = new Date(dateStr);
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatRelativeDate(dateStr: string): string {
+  const now = Date.now();
+  const then = new Date(dateStr).getTime();
+  const diff = now - then;
+
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  if (hours < 24) return `${hours}h ago`;
+  if (days < 7) return `${days}d ago`;
+  return formatDate(dateStr);
+}
+
+function getSeverityIcon(severity: string) {
+  switch (severity) {
+    case "critical":
+      return <XCircle className="h-3.5 w-3.5 text-red-500" />;
+    case "warning":
+      return <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />;
+    default:
+      return <Info className="h-3.5 w-3.5 text-blue-500" />;
+  }
+}
+
+// ─── Build SiteAnalysisResult from SiteAnalysis ───────────────────────────────
+
+function buildSiteAnalysisResult(analysis: SiteAnalysis & { siteName?: string; domain?: string }): SiteAnalysisResult {
+  return {
+    url: analysis.url,
+    analyzedAt: analysis.analyzedAt,
+    score: analysis.score,
+    status: analysis.status,
+    performance: {
+      lcp: null,
+      fid: null,
+      cls: null,
+      fcp: null,
+      ttfb: null,
+      tbt: null,
+      speedIndex: null,
+      mobileScore: analysis.quickStats?.performance ?? null,
+      desktopScore: null,
+    },
+    onPage: {
+      title: "",
+      titleLength: analysis.quickStats?.titleLength ?? 0,
+      metaDescription: "",
+      metaDescriptionLength: analysis.quickStats?.metaDescLength ?? 0,
+      h1: [],
+      h2: [],
+      h3: [],
+      canonicalUrl: null,
+      ogTitle: null,
+      ogDescription: null,
+      ogImage: null,
+      robotsMeta: null,
+      viewportMeta: true,
+      charset: null,
+      lang: null,
+      wordCount: analysis.quickStats?.wordCount ?? 0,
+      imageCount: analysis.quickStats?.imageCount ?? 0,
+      imagesWithAlt: 0,
+      imagesWithoutAlt: 0,
+      internalLinks: analysis.quickStats?.internalLinks ?? 0,
+      externalLinks: analysis.quickStats?.externalLinks ?? 0,
+      totalLinks: (analysis.quickStats?.internalLinks ?? 0) + (analysis.quickStats?.externalLinks ?? 0),
+      hasSitemap: true,
+      hasRobotsTxt: true,
+      hasHttps: true,
+      isMobileFriendly: true,
+    },
+    issues: analysis.issues,
+    suggestions: [],
+    readability: {
+      fleschScore: 0,
+      readingTime: Math.max(1, Math.ceil((analysis.quickStats?.wordCount ?? 0) / 200)),
+      level: "moderate" as const,
+    },
+  };
+}
+
+// ─── Report Templates ─────────────────────────────────────────────────────────
+
+interface ReportTemplate {
+  name: string;
+  description: string;
+  icon: React.ReactNode;
+  color: string;
+}
+
+const REPORT_TEMPLATES: ReportTemplate[] = [
+  {
+    name: "Full SEO Audit",
+    description: "Complete technical + on-page analysis with scores and recommendations",
+    icon: <Gauge className="h-5 w-5" />,
+    color: "text-emerald-600 bg-emerald-50 dark:bg-emerald-950",
+  },
+  {
+    name: "Performance Report",
+    description: "Core Web Vitals, page speed, and mobile optimization metrics",
+    icon: <Zap className="h-5 w-5" />,
+    color: "text-amber-600 bg-amber-50 dark:bg-amber-950",
+  },
+  {
+    name: "Content Analysis",
+    description: "On-page SEO scoring, readability, and content quality assessment",
+    icon: <FileSearch className="h-5 w-5" />,
+    color: "text-blue-600 bg-blue-50 dark:bg-blue-950",
+  },
+  {
+    name: "Keyword Report",
+    description: "Rankings, keyword opportunities, and search visibility tracking",
+    icon: <Target className="h-5 w-5" />,
+    color: "text-purple-600 bg-purple-50 dark:bg-purple-950",
+  },
+  {
+    name: "Backlink Report",
+    description: "Link profile analysis, toxicity scoring, and disavow recommendations",
+    icon: <Link2 className="h-5 w-5" />,
+    color: "text-rose-600 bg-rose-50 dark:bg-rose-950",
+  },
+  {
+    name: "Competitor Report",
+    description: "Domain comparison, keyword gaps, and competitive analysis",
+    icon: <Users className="h-5 w-5" />,
+    color: "text-cyan-600 bg-cyan-50 dark:bg-cyan-950",
+  },
+];
+
+// ─── Report Card ──────────────────────────────────────────────────────────────
+
+interface ReportCardProps {
+  analysis: SiteAnalysis & { siteName: string; domain: string };
+  onViewReport: (a: SiteAnalysis & { siteName: string; domain: string }) => void;
+  onDownloadCsv: (a: SiteAnalysis & { siteName: string; domain: string }, includeAi?: boolean) => void;
+  onDownloadPdf: (a: SiteAnalysis & { siteName: string; domain: string }, includeAi?: boolean) => void;
+}
+
+function ReportCard({ analysis, onViewReport, onDownloadCsv, onDownloadPdf }: ReportCardProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [includeAi, setIncludeAi] = useState(false);
+
+  const criticalCount = analysis.issues.filter((i) => i.severity === "critical").length;
+  const warningCount = analysis.issues.filter((i) => i.severity === "warning").length;
+  const infoCount = analysis.issues.filter((i) => i.severity === "info").length;
+  const topIssues = analysis.issues.slice(0, 5);
+
+  return (
+    <Card className="overflow-hidden">
+      <CardContent className="p-0">
+        <div className="p-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-3 min-w-0">
+              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center shrink-0">
+                <Globe className="h-5 w-5 text-white" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-foreground truncate">
+                  {analysis.domain || analysis.siteName}
+                </h3>
+                <p className="text-xs text-muted-foreground truncate mt-0.5">
+                  {analysis.url}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Badge className={`text-xs font-bold border ${getScoreBadgeClass(analysis.score)}`}>
+                {analysis.score}/100
+              </Badge>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4 mt-4 text-xs text-muted-foreground">
+            <div className="flex items-center gap-1.5">
+              <Calendar className="h-3.5 w-3.5" />
+              {formatRelativeDate(analysis.analyzedAt)}
+            </div>
+            <div className="flex items-center gap-2">
+              {criticalCount > 0 && (
+                <span className="flex items-center gap-1 text-red-600 dark:text-red-400">
+                  <XCircle className="h-3 w-3" />
+                  {criticalCount}
+                </span>
+              )}
+              {warningCount > 0 && (
+                <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                  <AlertTriangle className="h-3 w-3" />
+                  {warningCount}
+                </span>
+              )}
+              {infoCount > 0 && (
+                <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">
+                  <Info className="h-3 w-3" />
+                  {infoCount}
+                </span>
+              )}
+              {analysis.issues.length === 0 && (
+                <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                  <CheckCircle2 className="h-3 w-3" />
+                  No issues
+                </span>
+              )}
+            </div>
+
+          {/* Include AI Insights checkbox */}
+          <div className="flex items-center gap-2 mt-3">
+            <Checkbox
+              id={`ai-${analysis.id}`}
+              checked={includeAi}
+              onCheckedChange={(v) => setIncludeAi(v as boolean)}
+              className="data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
+            />
+            <label htmlFor={`ai-${analysis.id}`} className="text-xs text-muted-foreground cursor-pointer flex items-center gap-1.5">
+              <Sparkles className="h-3 w-3 text-emerald-600" />
+              Include AI Insights
+            </label>
+          </div>
+
+          <div className="flex items-center gap-2 mt-3">
+            <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={() => onViewReport(analysis)}>
+              <Eye className="h-3.5 w-3.5" />
+              View Report
+            </Button>
+            <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={() => onDownloadCsv(analysis, includeAi)}>
+              <Download className="h-3.5 w-3.5" />
+              CSV
+            </Button>
+            <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={() => onDownloadPdf(analysis, includeAi)}>
+              <FileText className="h-3.5 w-3.5" />
+              PDF
+            </Button>
+            <Button variant="ghost" size="sm" className="h-8 text-xs ml-auto" onClick={() => setExpanded(!expanded)}>
+              {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            </Button>
+          </div>
+        </div>
+
+        {expanded && (
+          <>
+            <Separator />
+            <div className="p-5 bg-muted/20 space-y-4">
+              <div className="grid grid-cols-4 gap-3">
+                <div className="text-center p-3 rounded-lg bg-background border">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Performance</p>
+                  <p className="text-lg font-bold tabular-nums mt-1" style={{ color: getScoreColor(analysis.quickStats?.performance ?? 0) }}>
+                    {analysis.quickStats?.performance ?? "N/A"}
+                  </p>
+                </div>
+                <div className="text-center p-3 rounded-lg bg-background border">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Content</p>
+                  <p className="text-lg font-bold tabular-nums mt-1" style={{ color: getScoreColor(analysis.quickStats?.contentScore ?? 0) }}>
+                    {analysis.quickStats?.contentScore ?? 0}
+                  </p>
+                </div>
+                <div className="text-center p-3 rounded-lg bg-background border">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Technical</p>
+                  <p className="text-lg font-bold tabular-nums mt-1" style={{ color: getScoreColor(analysis.quickStats?.technicalScore ?? 0) }}>
+                    {analysis.quickStats?.technicalScore ?? 0}
+                  </p>
+                </div>
+                <div className="text-center p-3 rounded-lg bg-background border">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Links</p>
+                  <p className="text-lg font-bold tabular-nums mt-1" style={{ color: getScoreColor(analysis.quickStats?.linksScore ?? 0) }}>
+                    {analysis.quickStats?.linksScore ?? 0}
+                  </p>
+                </div>
+              </div>
+
+              {topIssues.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Top Issues</h4>
+                  <div className="space-y-1.5">
+                    {topIssues.map((issue, idx) => (
+                      <div key={issue.id || idx} className="flex items-start gap-2 p-2 rounded-md bg-background border text-xs">
+                        {getSeverityIcon(issue.severity)}
+                        <div className="min-w-0 flex-1">
+                          <span className="font-medium text-foreground">{issue.title}</span>
+                          <span className="text-muted-foreground ml-2">{issue.impact} impact</span>
+                        </div>
+                      </div>
+                    ))}
+                    {analysis.issues.length > 5 && (
+                      <p className="text-[11px] text-muted-foreground text-center pt-1">
+                        +{analysis.issues.length - 5} more issues
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center gap-6 text-xs text-muted-foreground">
+                <span>{(analysis.quickStats?.wordCount ?? 0).toLocaleString()} words</span>
+                <span>{analysis.quickStats?.imageCount ?? 0} images</span>
+                <span>{analysis.quickStats?.internalLinks ?? 0} internal links</span>
+                <span>{analysis.quickStats?.externalLinks ?? 0} external links</span>
+              </div>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ─── View Report Dialog ───────────────────────────────────────────────────────
+
+interface ViewReportDialogProps {
+  analysis: SiteAnalysis & { siteName: string; domain: string } | null;
+  open: boolean;
+  onClose: () => void;
+  onDownloadCsv: (a: SiteAnalysis & { siteName: string; domain: string }) => void;
+  onDownloadPdf: (a: SiteAnalysis & { siteName: string; domain: string }) => void;
+}
+
+function ViewReportDialog({ analysis, open, onClose, onDownloadCsv, onDownloadPdf }: ViewReportDialogProps) {
+  if (!analysis) return null;
+
+  const topIssues = analysis.issues.slice(0, 5);
+  const criticalCount = analysis.issues.filter((i) => i.severity === "critical").length;
+  const warningCount = analysis.issues.filter((i) => i.severity === "warning").length;
+  const infoCount = analysis.issues.filter((i) => i.severity === "info").length;
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <BarChart3 className="h-5 w-5 text-emerald-600" />
+            SEO Report — {analysis.domain || analysis.siteName}
+          </DialogTitle>
+          <DialogDescription>
+            Analysis performed on {formatDate(analysis.analyzedAt)}
+          </DialogDescription>
+        </DialogHeader>
+
+        <ScrollArea className="flex-1 min-h-0 -mx-6 px-6">
+          <div className="space-y-6 pb-4">
+            <div className="flex items-center gap-6 p-5 rounded-xl bg-gradient-to-r from-emerald-50 to-emerald-100/50 dark:from-emerald-950 dark:to-emerald-900/30 border border-emerald-200 dark:border-emerald-800">
+              <div className="flex flex-col items-center">
+                <span className="text-5xl font-extrabold" style={{ color: getScoreColor(analysis.score) }}>
+                  {analysis.score}
+                </span>
+                <span className="text-sm font-semibold mt-1" style={{ color: getScoreColor(analysis.score) }}>
+                  {analysis.score >= 80 ? "Good" : analysis.score >= 50 ? "OK" : "Poor"}
+                </span>
+                <span className="text-[10px] text-muted-foreground">out of 100</span>
+              </div>
+              <div className="flex-1 space-y-2">
+                <p className="text-sm font-medium text-foreground">{analysis.url}</p>
+                <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                  <span className="flex items-center gap-1"><Calendar className="h-3.5 w-3.5" /> {formatRelativeDate(analysis.analyzedAt)}</span>
+                  <span className="flex items-center gap-1"><AlertCircle className="h-3.5 w-3.5" /> {analysis.issues.length} issues</span>
+                </div>
+                <div className="flex items-center gap-2 mt-2">
+                  {criticalCount > 0 && <Badge className="bg-red-100 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800 text-[10px]">{criticalCount} Critical</Badge>}
+                  {warningCount > 0 && <Badge className="bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800 text-[10px]">{warningCount} Warning</Badge>}
+                  {infoCount > 0 && <Badge className="bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800 text-[10px]">{infoCount} Info</Badge>}
+                  {analysis.issues.length === 0 && <Badge className="bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800 text-[10px]"><CheckCircle2 className="h-3 w-3 mr-1" />All Clear</Badge>}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <Card className="border-dashed">
+                <CardContent className="p-4 text-center">
+                  <Gauge className="h-5 w-5 text-emerald-500 mx-auto mb-1" />
+                  <p className="text-2xl font-bold tabular-nums" style={{ color: getScoreColor(analysis.quickStats?.performance ?? 0) }}>
+                    {analysis.quickStats?.performance ?? "—"}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground font-medium">Performance</p>
+                </CardContent>
+              </Card>
+              <Card className="border-dashed">
+                <CardContent className="p-4 text-center">
+                  <FileText className="h-5 w-5 text-blue-500 mx-auto mb-1" />
+                  <p className="text-2xl font-bold tabular-nums" style={{ color: getScoreColor(analysis.quickStats?.contentScore ?? 0) }}>
+                    {analysis.quickStats?.contentScore ?? 0}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground font-medium">Content</p>
+                </CardContent>
+              </Card>
+              <Card className="border-dashed">
+                <CardContent className="p-4 text-center">
+                  <Shield className="h-5 w-5 text-purple-500 mx-auto mb-1" />
+                  <p className="text-2xl font-bold tabular-nums" style={{ color: getScoreColor(analysis.quickStats?.technicalScore ?? 0) }}>
+                    {analysis.quickStats?.technicalScore ?? 0}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground font-medium">Technical</p>
+                </CardContent>
+              </Card>
+              <Card className="border-dashed">
+                <CardContent className="p-4 text-center">
+                  <Link2 className="h-5 w-5 text-amber-500 mx-auto mb-1" />
+                  <p className="text-2xl font-bold tabular-nums" style={{ color: getScoreColor(analysis.quickStats?.linksScore ?? 0) }}>
+                    {analysis.quickStats?.linksScore ?? 0}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground font-medium">Links</p>
+                </CardContent>
+              </Card>
+            </div>
+
+            {topIssues.length > 0 && (
+              <div>
+                <h4 className="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 text-red-500" />
+                  Top Issues
+                </h4>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-[90px]">Severity</TableHead>
+                      <TableHead>Issue</TableHead>
+                      <TableHead className="w-[80px]">Impact</TableHead>
+                      <TableHead className="w-[80px]">Effort</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {topIssues.map((issue, idx) => (
+                      <TableRow key={issue.id || idx}>
+                        <TableCell>
+                          <Badge className={`text-[10px] font-semibold border ${
+                            issue.severity === "critical" ? "bg-red-100 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800"
+                              : issue.severity === "warning" ? "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800"
+                              : "bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800"
+                          }`}>
+                            {issue.severity}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-xs">{issue.title}</TableCell>
+                        <TableCell className="text-xs capitalize">{issue.impact}</TableCell>
+                        <TableCell className="text-xs capitalize">{issue.effort}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                {analysis.issues.length > 5 && (
+                  <p className="text-[11px] text-muted-foreground text-center mt-2">
+                    Showing 5 of {analysis.issues.length} issues
+                  </p>
+                )}
+              </div>
+            )}
+
+            {analysis.issues.length === 0 && (
+              <div className="flex flex-col items-center gap-3 py-8">
+                <CheckCircle2 className="h-12 w-12 text-emerald-500" />
+                <p className="text-sm font-semibold text-emerald-600">No Issues Found</p>
+                <p className="text-xs text-muted-foreground text-center max-w-sm">
+                  This site has no SEO issues. Great job maintaining optimal SEO health!
+                </p>
+              </div>
+            )}
+          </div>
+        </ScrollArea>
+
+        <div className="flex items-center gap-2 pt-4 border-t">
+          <Button variant="outline" className="flex-1 gap-2" onClick={() => onDownloadCsv(analysis)}>
+            <Download className="h-4 w-4" />
+            Download CSV
+          </Button>
+          <Button className="flex-1 gap-2 bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => onDownloadPdf(analysis)}>
+            <FileText className="h-4 w-4" />
+            Download PDF
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+
+export function Reports() {
+  const [analyses, setAnalyses] = useState<(SiteAnalysis & { siteName: string; domain: string })[]>([]);
+  const [hydrated, setHydrated] = useState(false);
+  const [viewReport, setViewReport] = useState<(SiteAnalysis & { siteName: string; domain: string }) | null>(null);
+  const { toast } = useToast();
+  const setCurrentPage = useAppStore((s) => s.setCurrentPage);
+
+  // ── Load data on mount ──
+  useEffect(() => {
+    const loadData = () => {
+      try {
+        const data = getAllLatestAnalyses();
+        setAnalyses(data);
+      } catch {
+        // localStorage not available
+      }
+      setHydrated(true);
+    };
+
+    loadData();
+
+    const handleStorage = () => loadData();
+    window.addEventListener("storage", handleStorage);
+    const interval = setInterval(loadData, 3000);
+
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      clearInterval(interval);
+    };
+  }, []);
+
+  // ── Download handlers ──
+  const handleDownloadCsv = useCallback(async (analysis: SiteAnalysis & { siteName: string; domain: string }, includeAi?: boolean) => {
+    try {
+      const result = buildSiteAnalysisResult(analysis);
+      let csv = generateCsvReport(result);
+
+      if (includeAi) {
+        const issueTitles = analysis.issues.map(i => `${i.title} (${i.severity})`);
+        const recs = await generateSeoRecommendations(analysis.url, analysis.score, issueTitles);
+        if (recs) {
+          csv += "\n\n--- AI SEO Recommendations ---\n";
+          csv += "Category,Recommendation\n";
+          csv += recs.priorityActions.map(a => `"Priority Action","${a}"`).join("\n") + "\n";
+          csv += recs.contentIdeas.map(a => `"Content Idea","${a}"`).join("\n") + "\n";
+          csv += recs.technicalFixes.map(a => `"Technical Fix","${a}"`).join("\n") + "\n";
+        }
+      }
+
+      const domain = analysis.domain || "site";
+      downloadFile(csv, `seo-report-${domain}-${Date.now()}.csv`, "text/csv");
+      toast({ title: "CSV downloaded", description: `Report for ${domain} exported successfully.` });
+    } catch {
+      toast({ title: "Download failed", description: "Could not generate CSV report.", variant: "destructive" });
+    }
+  }, [toast]);
+
+  const handleDownloadPdf = useCallback(async (analysis: SiteAnalysis & { siteName: string; domain: string }, includeAi?: boolean) => {
+    try {
+      const result = buildSiteAnalysisResult(analysis);
+      let html = generateHtmlReport(result, analysis.siteName || analysis.domain);
+
+      if (includeAi) {
+        const issueTitles = analysis.issues.map(i => `${i.title} (${i.severity})`);
+        const recs = await generateSeoRecommendations(analysis.url, analysis.score, issueTitles);
+        if (recs) {
+          const aiSection = `
+          <div class="section">
+            <h2>&#129302; AI-Powered Recommendations</h2>
+            <h3 style="color:#dc2626">Priority Actions</h3>
+            <ul class="suggestions-list">${recs.priorityActions.map(a => `<li>${a}</li>`).join("")}</ul>
+            <h3 style="color:#d97706">Content Ideas</h3>
+            <ul class="suggestions-list">${recs.contentIdeas.map(a => `<li>${a}</li>`).join("")}</ul>
+            <h3 style="color:#0284c7">Technical Fixes</h3>
+            <ul class="suggestions-list">${recs.technicalFixes.map(a => `<li>${a}</li>`).join("")}</ul>
+          </div>`;
+          html = html.replace('</div>\n  </body>', aiSection + '</div>\n  </body>');
+        }
+      }
+
+      const domain = analysis.domain || "site";
+      downloadFile(html, `seo-report-${domain}-${Date.now()}.html`, "text/html");
+      toast({ title: "PDF report downloaded", description: `HTML report for ${domain} saved. Open in browser and print to PDF.` });
+    } catch {
+      toast({ title: "Download failed", description: "Could not generate HTML report.", variant: "destructive" });
+    }
+  }, [toast]);
+
+  const handleExportAll = useCallback(() => {
+    try {
+      if (analyses.length === 0) return;
+      const allCsv = analyses.map((a) => {
+        const result = buildSiteAnalysisResult(a);
+        return generateCsvReport(result);
+      }).join("\n\n---\n\n");
+
+      downloadFile(allCsv, `seo-reports-all-${Date.now()}.csv`, "text/csv");
+      toast({ title: "All reports exported", description: `${analyses.length} report(s) exported as CSV.` });
+    } catch {
+      toast({ title: "Export failed", description: "Could not export reports.", variant: "destructive" });
+    }
+  }, [analyses, toast]);
+
+  // ── Competitor CSV Export ──
+  const handleExportCompetitorReport = useCallback(() => {
+    try {
+      const allCompetitorsStr = localStorage.getItem('seo_competitors');
+      if (!allCompetitorsStr) {
+        toast({ title: "No competitor data", description: "No competitor analyses found. Add competitors in the Competitor Analysis page.", variant: "destructive" });
+        return;
+      }
+
+      const allCompetitors = JSON.parse(allCompetitorsStr) as Record<string, { id: string; url: string; domain: string; seoScore: number | null; lastAnalysisAt: string | null }[]>;
+      const lines: string[] = [];
+
+      lines.push("Competitor,Domain,SEO Score,Last Analyzed,Status");
+      lines.push("");
+
+      for (const [, competitors] of Object.entries(allCompetitors)) {
+        for (const c of competitors) {
+          const score = c.seoScore ?? 0;
+          const status = score >= 80 ? "Good" : score >= 50 ? "OK" : "Poor";
+          const lastAnalyzed = c.lastAnalysisAt ? new Date(c.lastAnalysisAt).toLocaleDateString() : "Never";
+          lines.push(`"${c.domain}","${c.url}",${score},"${lastAnalyzed}","${status}"`);
+        }
+      }
+
+      lines.push("");
+      lines.push(`Exported: ${new Date().toISOString()}`);
+
+      downloadFile(lines.join("\n"), `competitor-report-${Date.now()}.csv`, "text/csv");
+      toast({ title: "Competitor report exported", description: "CSV with side-by-side competitor metrics downloaded." });
+    } catch {
+      toast({ title: "Export failed", description: "Could not export competitor report.", variant: "destructive" });
+    }
+  }, [toast]);
+
+  // ── Schedule toggle/remove ──
+  const [schedules, setSchedules] = React.useState<ReturnType<typeof getSchedules>>([]);
+
+  const refreshSchedules = useCallback(() => {
+    try { setSchedules(getSchedules()); } catch { /* noop */ }
+  }, []);
+
+  useEffect(() => {
+    refreshSchedules();
+    const handleStorage = () => refreshSchedules();
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, [refreshSchedules]);
+
+  const handleToggleSchedule = useCallback((id: string) => {
+    try { toggleSchedule(id); refreshSchedules(); } catch { /* noop */ }
+  }, [refreshSchedules]);
+
+  const handleRemoveSchedule = useCallback((id: string) => {
+    try { removeSchedule(id); refreshSchedules(); toast({ title: "Schedule removed" }); } catch { /* noop */ }
+  }, [refreshSchedules, toast]);
+
+  // ── Render ──
+  const hasReports = analyses.length > 0;
+
+  const frequencyBadgeClass = (freq: string) => {
+    if (freq === "daily") return "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400";
+    if (freq === "weekly") return "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-400";
+    return "bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-400";
+  };
+
+  return (
+    <div className="flex flex-col gap-6">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight text-foreground flex items-center gap-2">
+            <FileBarChart className="h-6 w-6 text-emerald-500" />
+            Reports
+          </h2>
+          <p className="text-sm text-muted-foreground mt-1">
+            {hasReports
+              ? `${analyses.length} report${analyses.length !== 1 ? "s" : ""} generated from your site analyses`
+              : "Analyze a site first to generate reports"}
+          </p>
+        </div>
+        {hasReports && (
+          <div className="flex items-center gap-2">
+            <Button variant="outline" className="gap-2" onClick={handleExportCompetitorReport}>
+              <Users className="h-4 w-4" />
+              Export Competitor Report
+            </Button>
+            <Button variant="outline" className="gap-2" onClick={handleExportAll}>
+              <Download className="h-4 w-4" />
+              Export All Reports
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Scheduled Reports Section */}
+      {hydrated && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Clock className="h-4 w-4 text-emerald-600" />
+                  Scheduled Reports
+                </CardTitle>
+                <CardDescription>Audit schedules configured in the Automation page</CardDescription>
+              </div>
+              {schedules.length > 0 && (
+                <Badge className="bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800 text-xs">
+                  {schedules.filter(s => s.enabled).length} active
+                </Badge>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {schedules.length === 0 ? (
+              <div className="flex flex-col items-center gap-3 py-6 text-center">
+                <Calendar className="h-10 w-10 text-muted-foreground/40" />
+                <div>
+                  <p className="text-sm font-medium text-muted-foreground">No scheduled audits configured</p>
+                  <p className="text-xs text-muted-foreground mt-1">Set up scheduled audits in the Automation page</p>
+                </div>
+                <Button variant="outline" size="sm" className="mt-1" onClick={() => setCurrentPage("automation")}>
+                  <ArrowRight className="h-3.5 w-3.5 mr-1.5" />
+                  Go to Automation
+                </Button>
+              </div>
+            ) : (
+              <ScrollArea className="max-h-64 overflow-y-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Schedule Name</TableHead>
+                      <TableHead>Site</TableHead>
+                      <TableHead>Frequency</TableHead>
+                      <TableHead>Last Run</TableHead>
+                      <TableHead>Next Run</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="w-[100px]">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {schedules.map((sched) => (
+                      <TableRow key={sched.id} className={!sched.enabled ? "opacity-50" : ""}>
+                        <TableCell className="text-sm font-medium">{sched.name}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground max-w-[180px] truncate">{sched.siteUrl}</TableCell>
+                        <TableCell>
+                          <Badge className={`text-[10px] ${frequencyBadgeClass(sched.frequency)}`}>
+                            {sched.frequency}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {sched.lastRun ? formatRelativeDate(sched.lastRun) : "Never"}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {new Date(sched.nextRun).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={sched.enabled ? "default" : "secondary"} className={`text-[10px] ${sched.enabled ? "bg-emerald-600 text-white" : ""}`}>
+                            {sched.enabled ? "Active" : "Paused"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1">
+                            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => handleToggleSchedule(sched.id)}>
+                              <ToggleLeft className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-red-500" onClick={() => handleRemoveSchedule(sched.id)}>
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* State: No Reports */}
+      {!hydrated ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Card key={i}>
+              <CardContent className="p-6 space-y-3">
+                <div className="h-4 w-3/4 rounded bg-muted animate-pulse" />
+                <div className="h-3 w-1/2 rounded bg-muted animate-pulse" />
+                <div className="h-3 w-2/3 rounded bg-muted animate-pulse" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : !hasReports ? (
+        <>
+          <Card className="overflow-hidden">
+            <CardContent className="p-12">
+              <div className="flex flex-col items-center text-center max-w-md mx-auto">
+                <div className="h-20 w-20 rounded-2xl bg-muted/40 flex items-center justify-center mb-6">
+                  <FileBarChart className="h-10 w-10 text-muted-foreground" />
+                </div>
+                <h3 className="text-lg font-bold text-foreground">No reports generated yet</h3>
+                <p className="text-sm text-muted-foreground mt-2 mb-6">
+                  Start by analyzing a website in the SEO Audit tool. Once analyzed, reports will appear here with full score breakdowns and issue tracking.
+                </p>
+                <Button className="bg-emerald-600 hover:bg-emerald-700 text-white gap-2" onClick={() => setCurrentPage("audit")}>
+                  <ArrowRight className="h-4 w-4" />
+                  Go to SEO Audit
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <div>
+            <div className="flex items-center gap-2 mb-4">
+              <h3 className="text-sm font-semibold text-foreground">Report Templates</h3>
+              <Badge variant="outline" className="text-[10px]">Coming Soon</Badge>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {REPORT_TEMPLATES.map((template) => (
+                <Card key={template.name} className="group hover:border-emerald-200 dark:hover:border-emerald-800 transition-colors">
+                  <CardContent className="p-5">
+                    <div className="flex items-start gap-3">
+                      <div className={`h-10 w-10 rounded-xl flex items-center justify-center shrink-0 ${template.color}`}>
+                        {template.icon}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-sm font-bold text-foreground">{template.name}</h4>
+                          <Badge variant="secondary" className="text-[10px] font-medium">Coming Soon</Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">{template.description}</p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          {/* Summary Stats */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <Card>
+              <CardContent className="p-4">
+                <p className="text-xs text-muted-foreground font-medium">Total Reports</p>
+                <p className="text-2xl font-bold mt-1">{analyses.length}</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4">
+                <p className="text-xs text-muted-foreground font-medium">Avg. Score</p>
+                <p className="text-2xl font-bold mt-1" style={{ color: getScoreColor(Math.round(analyses.reduce((s, a) => s + a.score, 0) / analyses.length)) }}>
+                  {Math.round(analyses.reduce((s, a) => s + a.score, 0) / analyses.length)}
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4">
+                <p className="text-xs text-muted-foreground font-medium">Total Issues</p>
+                <p className="text-2xl font-bold text-red-500 mt-1">{analyses.reduce((s, a) => s + a.issues.length, 0)}</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4">
+                <p className="text-xs text-muted-foreground font-medium">Top Score</p>
+                <p className="text-2xl font-bold text-emerald-600 mt-1">{Math.max(...analyses.map((a) => a.score))}</p>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Report Cards */}
+          <div className="space-y-4">
+            <h3 className="text-sm font-semibold text-foreground">All Reports</h3>
+            <div className="space-y-3">
+              {analyses.map((analysis) => (
+                <ReportCard
+                  key={analysis.id}
+                  analysis={analysis}
+                  onViewReport={setViewReport}
+                  onDownloadCsv={handleDownloadCsv}
+                  onDownloadPdf={handleDownloadPdf}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Report Templates */}
+          <div>
+            <div className="flex items-center gap-2 mb-4">
+              <h3 className="text-sm font-semibold text-foreground">Report Templates</h3>
+              <Badge variant="outline" className="text-[10px]">Coming Soon</Badge>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {REPORT_TEMPLATES.map((template) => (
+                <Card key={template.name} className="group hover:border-emerald-200 dark:hover:border-emerald-800 transition-colors">
+                  <CardContent className="p-5">
+                    <div className="flex items-start gap-3">
+                      <div className={`h-10 w-10 rounded-xl flex items-center justify-center shrink-0 ${template.color}`}>
+                        {template.icon}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-sm font-bold text-foreground">{template.name}</h4>
+                          <Badge variant="secondary" className="text-[10px] font-medium">Coming Soon</Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">{template.description}</p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      <ViewReportDialog
+        analysis={viewReport}
+        open={!!viewReport}
+        onClose={() => setViewReport(null)}
+        onDownloadCsv={handleDownloadCsv}
+        onDownloadPdf={handleDownloadPdf}
+      />
+    </div>
+  );
+}

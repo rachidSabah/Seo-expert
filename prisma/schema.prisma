@@ -1,0 +1,213 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  password  String
+  role      String   @default("admin")
+  avatar    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  projects  Project[]
+  audits    SeoAudit[]
+  settings  UserSettings?
+}
+
+model UserSettings {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  darkMode      Boolean  @default(true)
+  language      String   @default("en")
+  notifications Boolean  @default(true)
+  whiteLabel    Boolean  @default(false)
+  brandName     String?
+  primaryColor  String   @default("#10b981")
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  domain      String
+  description String?
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  audits      SeoAudit[]
+  keywords    TrackedKeyword[]
+  backlinks   Backlink[]
+  rankings    KeywordRanking[]
+  pages       PageData[]
+  competitors Competitor[]
+  alerts      Alert[]
+}
+
+model SeoAudit {
+  id            String   @id @default(cuid())
+  projectId     String
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id])
+  healthScore   Int      @default(0)
+  totalIssues   Int      @default(0)
+  criticalCount Int      @default(0)
+  warningCount  Int      @default(0)
+  infoCount     Int      @default(0)
+  status        String   @default("pending")
+  createdAt     DateTime @default(now())
+  issues        AuditIssue[]
+}
+
+model AuditIssue {
+  id          String   @id @default(cuid())
+  auditId     String
+  audit       SeoAudit @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  type        String
+  severity    String
+  title       String
+  description String
+  url         String?
+  impact      String   @default("medium")
+  effort      String   @default("medium")
+  status      String   @default("open")
+  createdAt   DateTime @default(now())
+}
+
+model TrackedKeyword {
+  id          String   @id @default(cuid())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  keyword     String
+  volume      Int      @default(0)
+  difficulty  Int      @default(0)
+  cpc         Float    @default(0)
+  intent      String   @default("informational")
+  currentPos  Int      @default(0)
+  bestPos     Int      @default(0)
+  country     String   @default("us")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Backlink {
+  id              String   @id @default(cuid())
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceUrl       String
+  sourceDomain    String
+  targetUrl       String
+  anchorText      String
+  linkType        String   @default("dofollow")
+  domainRating    Int      @default(0)
+  traffic         Int      @default(0)
+  isToxic         Boolean  @default(false)
+  firstSeen       DateTime @default(now())
+  lastChecked     DateTime @default(now())
+  createdAt       DateTime @default(now())
+}
+
+model KeywordRanking {
+  id          String   @id @default(cuid())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  keyword     String
+  position    Int
+  previousPos Int?
+  change      Int      @default(0)
+  url         String?
+  country     String   @default("us")
+  trackedAt   DateTime @default(now())
+  createdAt   DateTime @default(now())
+}
+
+model PageData {
+  id          String   @id @default(cuid())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  url         String
+  title       String?
+  description String?
+  h1          String?
+  wordCount   Int      @default(0)
+  seoScore    Int      @default(0)
+  readability Float    @default(0)
+  status      String   @default("active")
+  lastCrawled DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Competitor {
+  id              String   @id @default(cuid())
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  domain          String
+  domainRating    Int      @default(0)
+  organicTraffic  Int      @default(0)
+  organicKeywords Int      @default(0)
+  backlinks       Int      @default(0)
+  topPages        String   @default("[]")
+  commonKeywords  String   @default("[]")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model Alert {
+  id          String   @id @default(cuid())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type        String
+  title       String
+  message     String
+  severity    String   @default("info")
+  isRead      Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}
+
+model Report {
+  id          String   @id @default(cuid())
+  projectId   String?
+  title       String
+  type        String
+  data        String   @default("{}")
+  format      String   @default("pdf")
+  createdAt   DateTime @default(now())
+}
+
+model AutomationRule {
+  id          String   @id @default(cuid())
+  projectId   String?
+  name        String
+  trigger     String
+  action      String
+  isActive    Boolean  @default(true)
+  lastRun     DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model ContentDraft {
+  id          String   @id @default(cuid())
+  projectId   String?
+  title       String
+  content     String   @default("")
+  metaDesc    String?
+  headings    String   @default("[]")
+  keywords    String   @default("[]")
+  seoScore    Int      @default(0)
+  status      String   @default("draft")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
