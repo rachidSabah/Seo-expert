@@ -6,7 +6,7 @@
  *
  * Data sources:
  *   - Google PageSpeed Insights API (CORS-enabled, no auth)
- *   - allorigins.win CORS proxy for HTML fetching
+ *   - Multiple CORS proxies for HTML fetching (fallback chain)
  *   - Regex-based HTML parsing for on-page elements
  */
 
@@ -121,7 +121,26 @@ interface PerformanceData {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
+/**
+ * List of CORS proxy endpoints, tried in order until one succeeds.
+ * Each entry has a name (for logging) and a function that builds the proxy URL.
+ */
+const CORS_PROXIES: Array<{ name: string; buildUrl: (targetUrl: string) => string }> = [
+  {
+    name: 'allorigins',
+    buildUrl: (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  },
+  {
+    name: 'corsproxy',
+    buildUrl: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  },
+  {
+    name: 'codetabs',
+    buildUrl: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+  },
+];
+
+const PROXY_TIMEOUT_MS = 10_000;
 
 const VALID_TLDS = [
   'com', 'org', 'net', 'edu', 'gov', 'mil', 'io', 'co', 'dev', 'app',
@@ -184,6 +203,61 @@ export function isValidUrl(url: string): { valid: boolean; normalized: string; e
   } catch {
     return { valid: false, normalized: '', error: 'Invalid URL format.' };
   }
+}
+
+// ─── CORS Proxy Fetch with Fallback ──────────────────────────────────────────
+
+/**
+ * Fetch HTML through multiple CORS proxies in sequence.
+ * Returns { html, proxyUsed } on success, or { html: '', proxyUsed: null } if all fail.
+ * Each proxy gets PROXY_TIMEOUT_MS before we move on to the next.
+ */
+async function fetchWithProxyFallback(targetUrl: string): Promise<{ html: string; proxyUsed: string | null }> {
+  for (const proxy of CORS_PROXIES) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+
+      const proxyUrl = proxy.buildUrl(targetUrl);
+      const response = await fetch(proxyUrl, {
+        signal: controller.signal,
+        headers: {
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+      });
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        console.warn(`[url-analyzer] Proxy "${proxy.name}" returned HTTP ${response.status}`);
+        continue;
+      }
+
+      const html = await response.text();
+
+      // Validate that we got meaningful HTML back (not empty or error page)
+      if (!html || html.trim().length === 0) {
+        console.warn(`[url-analyzer] Proxy "${proxy.name}" returned empty content`);
+        continue;
+      }
+
+      // Check if it looks like HTML (has at least one HTML tag)
+      if (!/<[a-z][\s\S]*>/i.test(html)) {
+        console.warn(`[url-analyzer] Proxy "${proxy.name}" returned non-HTML content (${html.trim().substring(0, 100)}...)`);
+        continue;
+      }
+
+      console.log(`[url-analyzer] Successfully fetched HTML via proxy "${proxy.name}" (${html.length} bytes)`);
+      return { html, proxyUsed: proxy.name };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.warn(`[url-analyzer] Proxy "${proxy.name}" failed: ${reason}`);
+      // Continue to next proxy
+    }
+  }
+
+  console.error(`[url-analyzer] ALL proxies failed for URL: ${targetUrl}`);
+  return { html: '', proxyUsed: null };
 }
 
 // ─── HTML Parsing Helpers ─────────────────────────────────────────────────────
@@ -423,6 +497,32 @@ function countLinks(html: string, baseUrl: string): { internal: number; external
 // ─── Full HTML Parsing ────────────────────────────────────────────────────────
 
 function parseHtmlContent(html: string, baseUrl: string): OnPageData {
+  // When HTML is empty, return zeros/defaults so scoring can still run
+  if (!html || html.trim().length === 0) {
+    return {
+      title: '',
+      metaDescription: '',
+      h1: [],
+      h2: [],
+      h3: [],
+      canonicalUrl: null,
+      ogTitle: null,
+      ogDescription: null,
+      ogImage: null,
+      robotsMeta: null,
+      viewportMeta: false,
+      charset: null,
+      lang: null,
+      wordCount: 0,
+      imageCount: 0,
+      imagesWithAlt: 0,
+      imagesWithoutAlt: 0,
+      internalLinks: 0,
+      externalLinks: 0,
+      totalLinks: 0,
+    };
+  }
+
   const title = extractTagContent(html, 'title');
 
   const metaDescription = extractMetaContent(html, 'name', 'description') || '';
@@ -556,34 +656,35 @@ function parsePageSpeedData(data: Record<string, unknown>): PerformanceData {
 // ─── URL Existence Check ──────────────────────────────────────────────────────
 
 async function checkUrlExists(url: string): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-
-    const response = await fetch(CORS_PROXY + encodeURIComponent(url), {
-      method: 'HEAD',
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-    return response.ok;
-  } catch {
-    // Fallback: try GET with a short timeout
+  // Try each CORS proxy for the existence check too
+  for (const proxy of CORS_PROXIES) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
 
-      const response = await fetch(CORS_PROXY + encodeURIComponent(url), {
-        method: 'GET',
+      const proxyUrl = proxy.buildUrl(url);
+      const response = await fetch(proxyUrl, {
+        method: 'HEAD',
         signal: controller.signal,
       });
 
       clearTimeout(timeout);
-      return response.ok;
+      if (response.ok) return true;
+
+      // Some proxies don't support HEAD, fall back to GET
+      const controller2 = new AbortController();
+      const timeout2 = setTimeout(() => controller2.abort(), 8000);
+      const getResponse = await fetch(proxyUrl, {
+        method: 'GET',
+        signal: controller2.signal,
+      });
+      clearTimeout(timeout2);
+      if (getResponse.ok) return true;
     } catch {
-      return false;
+      // Try next proxy
     }
   }
+  return false;
 }
 
 // ─── Issue Generation ─────────────────────────────────────────────────────────
@@ -956,47 +1057,51 @@ export async function analyzeUrl(url: string): Promise<SiteAnalysisResult> {
   }
 
   const normalizedUrl = validation.normalized;
+  const hasHttps = normalizedUrl.startsWith('https://');
   const startTime = Date.now();
 
   // ── Launch all API calls in parallel ──
+  // HTML fetch uses the fallback proxy chain (sequential inside the promise)
+  const mobilePsPromise = fetch(
+    `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(normalizedUrl)}&strategy=mobile&category=performance`
+  ).then(res => {
+    if (!res.ok) throw new Error(`PageSpeed HTTP ${res.status}`);
+    return res.json();
+  });
+
+  const desktopPsPromise = fetch(
+    `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(normalizedUrl)}&strategy=desktop&category=performance`
+  ).then(res => {
+    if (!res.ok) throw new Error(`PageSpeed Desktop HTTP ${res.status}`);
+    return res.json();
+  });
+
+  // HTML fetch with proxy fallback (runs independently)
+  const htmlPromise = fetchWithProxyFallback(normalizedUrl);
+
+  // Sitemap and robots.txt checks
+  const sitemapPromise = checkUrlExists(normalizedUrl + '/sitemap.xml');
+  const robotsPromise = checkUrlExists(normalizedUrl + '/robots.txt');
 
   const [htmlResult, mobilePsResult, desktopPsResult, sitemapResult, robotsResult] = await Promise.allSettled([
-    // Fetch HTML via CORS proxy
-    fetch(CORS_PROXY + encodeURIComponent(normalizedUrl))
-      .then(res => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.text();
-      }),
-
-    // Fetch mobile PageSpeed data
-    fetch(
-      `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(normalizedUrl)}&strategy=mobile&category=performance`
-    )
-      .then(res => {
-        if (!res.ok) throw new Error(`PageSpeed HTTP ${res.status}`);
-        return res.json();
-      }),
-
-    // Fetch desktop PageSpeed data
-    fetch(
-      `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(normalizedUrl)}&strategy=desktop&category=performance`
-    )
-      .then(res => {
-        if (!res.ok) throw new Error(`PageSpeed Desktop HTTP ${res.status}`);
-        return res.json();
-      }),
-
-    // Check sitemap
-    checkUrlExists(normalizedUrl + '/sitemap.xml'),
-
-    // Check robots.txt
-    checkUrlExists(normalizedUrl + '/robots.txt'),
+    htmlPromise,
+    mobilePsPromise,
+    desktopPsPromise,
+    sitemapPromise,
+    robotsPromise,
   ]);
 
   // ── Extract HTML ──
   let html = '';
+  let htmlFetchFailed = false;
   if (htmlResult.status === 'fulfilled') {
-    html = htmlResult.value;
+    html = htmlResult.value.html;
+    if (!html) {
+      htmlFetchFailed = true;
+    }
+  } else {
+    htmlFetchFailed = true;
+    console.warn(`[url-analyzer] HTML fetch promise rejected:`, htmlResult.reason);
   }
 
   // ── Extract PageSpeed data ──
@@ -1019,33 +1124,42 @@ export async function analyzeUrl(url: string): Promise<SiteAnalysisResult> {
   const hasSitemap = sitemapResult.status === 'fulfilled' && sitemapResult.value;
   const hasRobotsTxt = robotsResult.status === 'fulfilled' && robotsResult.value;
 
-  // ── Parse HTML ──
+  // ── Parse HTML (handles empty HTML gracefully with zeros/defaults) ──
   const onPage = parseHtmlContent(html, normalizedUrl);
-  const hasHttps = normalizedUrl.startsWith('https://');
 
   // ── Calculate readability ──
-  const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-  const bodyContent = bodyMatch ? bodyMatch[1] : html;
-  const plainText = stripHtmlTags(bodyContent);
-  const fleschScore = calculateFlesch(plainText);
-  const wordCount = onPage.wordCount;
-  const readingTime = Math.max(1, Math.ceil(wordCount / 200));
+  let finalReadability: { fleschScore: number; readingTime: number; level: 'easy' | 'moderate' | 'hard' };
 
-  let level: 'easy' | 'moderate' | 'hard';
-  if (fleschScore >= 60 && fleschScore <= 80) level = 'easy';
-  else if ((fleschScore >= 40 && fleschScore < 60) || (fleschScore > 80 && fleschScore <= 90)) level = 'moderate';
-  else level = 'hard';
+  if (html) {
+    const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+    const bodyContent = bodyMatch ? bodyMatch[1] : html;
+    const plainText = stripHtmlTags(bodyContent);
+    const fleschScore = calculateFlesch(plainText);
+    const wordCount = onPage.wordCount;
+    const readingTime = Math.max(1, Math.ceil(wordCount / 200));
 
-  // If no HTML was fetched, readability defaults to 0
-  const finalReadability = html ? { fleschScore, readingTime, level } : { fleschScore: 0, readingTime: 0, level: 'hard' as const };
+    let level: 'easy' | 'moderate' | 'hard';
+    if (fleschScore >= 60 && fleschScore <= 80) level = 'easy';
+    else if ((fleschScore >= 40 && fleschScore < 60) || (fleschScore > 80 && fleschScore <= 90)) level = 'moderate';
+    else level = 'hard';
+
+    finalReadability = { fleschScore, readingTime, level };
+  } else {
+    finalReadability = { fleschScore: 0, readingTime: 0, level: 'hard' };
+  }
 
   // ── Generate issues ──
   const { issues, suggestions } = generateIssues(onPage, mobilePerf, hasHttps, hasSitemap, hasRobotsTxt);
 
-  // ── Calculate score ──
-  const score = html
-    ? calculateOverallScore(onPage, mobilePerf, hasHttps, hasSitemap, hasRobotsTxt)
-    : 0;
+  // ── ALWAYS calculate score (even when HTML is empty) ──
+  // When HTML is empty, on-page data will be zeros/defaults, but:
+  //   - HTTPS check: +5 technical points
+  //   - PageSpeed data: up to 25 performance points
+  //   - Sitemap: +4 technical points
+  //   - Robots.txt: +3 technical points
+  //   - No images: +5 accessibility points (no images = no alt issues)
+  // This means minimum score with PageSpeed working ≈ 12-30
+  const score = calculateOverallScore(onPage, mobilePerf, hasHttps, hasSitemap, hasRobotsTxt);
 
   let status: 'good' | 'ok' | 'poor';
   if (score >= 80) status = 'good';
@@ -1054,6 +1168,30 @@ export async function analyzeUrl(url: string): Promise<SiteAnalysisResult> {
 
   // ── Determine mobile friendliness ──
   const isMobileFriendly = onPage.viewportMeta && hasHttps;
+
+  // ── If HTML fetch failed, add an informational note ──
+  const finalIssues = htmlFetchFailed
+    ? [
+        ...issues,
+        {
+          id: 'issue-html-fetch-failed',
+          severity: 'warning' as const,
+          category: 'technical' as const,
+          title: 'HTML Fetch Failed — Partial Analysis',
+          description: 'Could not fetch the page HTML through any proxy. On-page SEO data (title, headings, content, images, links) could not be analyzed. The score below is based only on PageSpeed performance data, HTTPS check, sitemap, and robots.txt.',
+          impact: 'high' as const,
+          effort: 'low' as const,
+          recommendation: 'The page may block proxy requests or have strict CORS policies. Try analyzing again later, or check if the site is behind a firewall or CDN that blocks proxy traffic.',
+        },
+      ]
+    : issues;
+
+  const finalSuggestions = htmlFetchFailed
+    ? [
+        ...suggestions,
+        'HTML could not be fetched — on-page SEO analysis is incomplete',
+      ]
+    : suggestions;
 
   return {
     url: normalizedUrl,
@@ -1102,8 +1240,8 @@ export async function analyzeUrl(url: string): Promise<SiteAnalysisResult> {
       isMobileFriendly,
     },
 
-    issues,
-    suggestions,
+    issues: finalIssues,
+    suggestions: finalSuggestions,
     readability: finalReadability,
   };
 }
